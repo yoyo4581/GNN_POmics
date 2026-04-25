@@ -1,10 +1,6 @@
 from transformers import AutoTokenizer, AutoModel
 import torch
 from typing import List
-import numpy as np
-import umap
-import torch.nn.functional as F
-
 
 class BioBERTEmbeddings():
     def __init__(self):
@@ -44,26 +40,4 @@ class BioBERTEmbeddings():
             all_embeddings.extend(embeddings.cpu().numpy().tolist())
         
         return all_embeddings
-
-
-@torch.no_grad()
-def collect_embeddings(model, dataloader, device):
-    """
-    Returns projected embeddings + labels for a full dataloader pass.
-    model.head is your LabelEmbeddingHead.
-    """
-    model.eval()
-    all_proj, all_labels = [], []
-    
-    for batch in dataloader:
-        batch = batch.to(device)
-        
-        graph_emb, node_emb, attn_weights  = model.gat(batch.x.unsqueeze(1), batch.edge_index, batch.batch)
-        proj = model.head.projector(graph_emb)
-        proj = F.normalize(proj, dim=-1)       # unit sphere
-
-        all_proj.append(proj.cpu().numpy())
-        all_labels.append(batch.y.cpu().numpy())
-
-    return np.concatenate(all_proj), np.concatenate(all_labels)
 
