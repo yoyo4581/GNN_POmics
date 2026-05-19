@@ -13,6 +13,8 @@ from torch_geometric.data import Data
 from torch_geometric.explain import Explainer
 from torch_geometric.explain.algorithm import GNNExplainer
 from torch_geometric.explain.config import ModelConfig
+
+
  
 class ExplainerWrapper(nn.Module):
     def __init__(self, model):
@@ -21,7 +23,7 @@ class ExplainerWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         
-        out = self.model(x, edge_index, batch)
+        out, proj = self.model(x, edge_index, batch)
         # 🔴 Extract ONLY what the explainer needs
         logits = out["logits"]   # <-- adjust key if needed
         
@@ -72,7 +74,7 @@ def build_explainer(
             epochs=200,
             lr=0.01
         ),
-        explanation_type='phenomenon',
+        explanation_type='model',
         edge_mask_type='object',
         node_mask_type=None,
         model_config=ModelConfig(
