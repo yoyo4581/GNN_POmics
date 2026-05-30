@@ -25,9 +25,9 @@ class GATEncoder(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        hidden_dim: int = 256,
-        out_dim: int = 512,
-        heads: int = 8,
+        hidden_dim: int = 64,
+        out_dim: int = 768,
+        heads: int = 4,
         dropout: float = 0.1,
     ):
         super().__init__()
