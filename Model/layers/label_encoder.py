@@ -54,22 +54,28 @@ class LabelEmbeddingHead(nn.Module):
         """
         graph_emb: [B, graph_emb_dim]
  
-        Returns:
+        Returns:c
             logits:      [B, num_classes]  — cosine similarity * (1/T)
             confidence:  [B]               — max similarity in [0,1]
             pred_idx:    [B]               — argmax class index
         """
         assert self.label_embeddings is not None, \
             "Call set_label_embeddings() before forward()"
- 
-        proj = self.projector(graph_emb)                     # [B, D]
+
+        detached_graph_emb = graph_emb.detach()
+        proj = self.projector(detached_graph_emb)                     # [B, D]
         proj = F.normalize(proj, dim=-1)                     # unit sphere
  
         # Cosine similarity against all label embeddings
         # label_embeddings: [num_classes, D]
-        logits = proj @ self.label_embeddings.T / self.temperature  # [B, C]
- 
-        probs      = F.softmax(logits, dim=-1)               # [B, C]
-        confidence, pred_idx = probs.max(dim=-1)             # [B], [B]
- 
-        return logits, confidence, pred_idx
+        cosine_logits = proj @ self.label_embeddings.T  # [B, C]
+
+        # Predicted class
+        top2_vals, top2_idx = cosine_logits.topk(2, dim=-1)
+        
+        pred_idx = top2_idx[:, 0]
+        
+        #Margin confidence
+        confidence = top2_vals[:, 0] - top2_vals[:, 1]
+
+        return cosine_logits, confidence, pred_idx, proj
