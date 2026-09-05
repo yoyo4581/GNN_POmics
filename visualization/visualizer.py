@@ -12,7 +12,6 @@ from visualization.chord_diagram import global_layout
 from visualization.attention_percentile import log_attention_percentiles
 from visualization.confusion_matrix import plot_confusion_with_confidence
 from visualization.plot_correlation import ConsistencyTracker
-from visualization.graph_vis import plot_network, log_network_figure
 from visualization.new_matrix_dist import build_matrix
 
 
@@ -80,18 +79,10 @@ class Visualizer:
 
     assert cons_tracker.split == split, f"Tracker split '{cons_tracker.split}' does not match expected split '{split}'"
 
-    # bokeh_figs_by_class = {}
-    for class_idx, result in class_results.items():
-      if result.avg_edge_mask is None:
-        print(f"Class {class_idx}: no correct predictions, skipping.")
-        continue
-      
-      edge_mask = result.avg_edge_mask
+    # NOTE: per-class networkX renders (plot_network / log_network_figure) are no
+    # longer pushed to W&B -- they were too noisy to be a useful training signal.
+    # The implementations still live in graph_vis.py for ad-hoc/local use.
 
-      # plot networks.
-      fig = plot_network(edge_mask.edge_attention, self.graph)
-      log_network_figure(fig, label_map[class_idx], epoch, self.run, split)
-    
     correlation_line_plot = cons_tracker.update(epoch, class_results)
     
     matrix_fig = build_matrix(class_results, label_map)

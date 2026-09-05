@@ -24,6 +24,14 @@ class ConsistencyTracker:
     self.inter_coverage = {}
     self.inter_similarity = {}
 
+    # Between-class divergence at a single epoch (not per-class: one aggregate
+    # value per epoch, since it's a comparison *across* classes). Unlike
+    # intra_*/inter_* above (which we want trending toward agreement/stability),
+    # these should trend DOWN over training -- low overlap between different
+    # classes' explanation subgraphs is what "discriminative" actually means.
+    self.interclass_similarity = []
+    self.interclass_coverage = []
+
     self.history = {}
 
     for idx in label_map:
@@ -127,7 +135,44 @@ class ConsistencyTracker:
       jaccard_scores[p] = jaccard
 
     return jaccard_scores
-  
+
+  def _compute_interclass_divergence(self, avg_masks: list[tuple[int, EdgeMask]]):
+    """
+    Compare avg_edge_mask across DIFFERENT classes at the same epoch.
+
+    Reuses the same pairwise helpers as the intra-class / temporal-inter-class
+    checks above, just applied to a different pairing: every (class_a, class_b)
+    combination at this epoch, instead of every sample-pair within one class or
+    one class across two epochs. Low similarity / low coverage between classes
+    is the signal that the model is attending to genuinely class-specific
+    subgraphs rather than the same generic one for everybody.
+
+    Args:
+      avg_masks: list of (class_idx, avg_edge_mask) for classes that had at
+        least one correct prediction this epoch.
+
+    Returns:
+      tuple: (mean_cosine_similarity: float, mean_jaccard_by_percentile: dict)
+        or (nan, {}) if fewer than 2 classes are available to compare.
+    """
+    if len(avg_masks) < 2:
+      return float('nan'), {}
+
+    vectors = [mask for _, mask in avg_masks]
+    mean_similarity = self._mean_pairwise_cosine(vectors)
+
+    pairwise_coverage = [
+      self._compute_inter_coverage(mask_a, mask_b)
+      for (_, mask_a), (_, mask_b) in combinations(avg_masks, 2)
+    ]
+    percentiles = pairwise_coverage[0].keys()
+    mean_coverage = {
+      p: float(np.mean([scores[p] for scores in pairwise_coverage]))
+      for p in percentiles
+    }
+
+    return mean_similarity, mean_coverage
+
 
 
   def update(self, epoch: int, class_edge_masks: dict[int, ExplainerResult]):
@@ -169,6 +214,16 @@ class ConsistencyTracker:
         self.inter_coverage[class_idx].append((epoch, inter_p_jaccard_scores))
 
       self.history[class_idx].append((epoch, class_results.avg_edge_mask))
+
+    avg_masks = [
+      (class_idx, class_results.avg_edge_mask)
+      for class_idx, class_results in class_edge_masks.items()
+      if class_results.avg_edge_mask is not None
+    ]
+    similarity, coverage = self._compute_interclass_divergence(avg_masks)
+    if coverage:
+      self.interclass_similarity.append((epoch, similarity))
+      self.interclass_coverage.append((epoch, coverage))
 
     self._log_to_wandb(epoch)
 
@@ -222,8 +277,18 @@ class ConsistencyTracker:
     
     if any(self.intra_coverage[idx] for idx in self.label_map):
       fig = self.log_coverage(self.intra_coverage, title_str = 'Intra Coverage')
-      log_dict[f"intra_coverage/{self.split}"] = wandb.Plotly(fig) 
+      log_dict[f"intra_coverage/{self.split}"] = wandb.Plotly(fig)
 
-    
+    # Between-class divergence: unlike everything above, LOWER is the desired
+    # direction here -- it means different classes' explanation subgraphs are
+    # pulling apart rather than converging on the same generic pattern.
+    if self.interclass_similarity:
+      log_dict[f"interclass_cos_similarity/{self.split}"] = self.interclass_similarity[-1][1]
+
+    if self.interclass_coverage:
+      latest_curve = self.interclass_coverage[-1][1]
+      top10_percentile = min(latest_curve, key=lambda p: abs(p - 90))
+      log_dict[f"interclass_jaccard_top10pct/{self.split}"] = latest_curve[top10_percentile]
+
     if log_dict:
       wandb.log(log_dict, step=epoch)

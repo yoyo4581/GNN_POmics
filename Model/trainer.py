@@ -66,7 +66,7 @@ class Trainer(CoreRunner):
       for label, description in label_map.items():
           if label not in self.model.label_map:
               self.model.add_class(label, description)
-              self.consistency_tracker.add_class(label, description)
+              self.consistency_tracker.add_class(label)
               print(f'Added {label}: {description} class to model')
 
     # ------------------------------------------------------------------ #
@@ -112,14 +112,18 @@ class Trainer(CoreRunner):
     # Main training loop                                                  #
     # ------------------------------------------------------------------ #
 
-    def train(self, train_loader, epoch: int) -> ModelResults:
-
-        if epoch %20 ==0:
-            self.model.warmup_complete = True
+    def train(self, train_loader, epoch: int) -> tuple[ModelResults, TranslatorResults]:
 
         if epoch % 10 == 0:
             # Update prototypes.
             self.model.proto_mem.agglomerative_cluster()
+
+        if epoch % 20 == 0 and self.model.proto_mem.prototypes:
+            # Only start the InfoNCE term once clustering has actually produced
+            # at least one prototype -- otherwise InfoNCELoss crashes on an
+            # empty stack (e.g. if this ever fires before the memory queue has
+            # been populated, such as epoch numbering starting at 0).
+            self.model.warmup_complete = True
 
         self.model.train()
         num_batches = len(train_loader)
@@ -138,10 +142,12 @@ class Trainer(CoreRunner):
         avg_metrics = {
             f"{self.split_name}/model_loss": model_results.loss,
             f"{self.split_name}/model_acc": model_accuracy,
+            f"{self.split_name}/cosface_loss": model_results.cosface_loss,
+            f"{self.split_name}/infonce_loss": model_results.infonce_loss,
             f"{self.split_name}/translator_loss": translator_results.loss,
             f"{self.split_name}/translator_acc": translator_accuracy,
         }
         self._log_metrics(epoch, avg_metrics)
 
-        return model_results, translator_results 
+        return model_results, translator_results
 

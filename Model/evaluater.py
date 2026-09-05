@@ -31,7 +31,7 @@ class Evaluater(CoreRunner):
         consistency_tracker: ConsistencyTracker
     ):
         super().__init__(model, optimizer, device)
-        self.consistency_tracker = ConsistencyTracker(self.model.label_map, split='val')
+        self.consistency_tracker = consistency_tracker
         self.run = run
         self.visualizer = visualizer
 
@@ -57,6 +57,20 @@ class Evaluater(CoreRunner):
       class_results = self.edge_explainer.explain_subsamples(self.model, model_results, loader)
       return class_results
 
+    def log_fidelity(self, loader: DataLoader, epoch: int, top_frac: float = 0.1, max_samples: int = 100) -> dict:
+      """
+      Run CoreRunner.fidelity_check on `loader.dataset` and log the result to
+      W&B. This is a periodic diagnostic (each graph costs up to 3 forward
+      passes) -- call it every N epochs from the training loop, not every one.
+      """
+      result = self.fidelity_check(loader.dataset, top_frac=top_frac, max_samples=max_samples)
+      self.run.log({
+          f"fidelity/{self.split_name}/baseline_acc": result["baseline_acc"],
+          f"fidelity/{self.split_name}/topk_acc": result["topk_acc"],
+          f"fidelity/{self.split_name}/complement_acc": result["complement_acc"],
+      }, step=epoch)
+      return result
+
 
     def visualize_all(self, epoch: int, model_results: ModelResults, translator_results: TranslatorResults, class_results: dict):
       self.visualizer.visualize(
@@ -77,13 +91,13 @@ class Evaluater(CoreRunner):
           translator_results.labels,
           translator_results.predictions,
           translator_results.pred_confidence,
-          'val',
+          self.split_name,
           "translator",
       )
       self.visualizer.log_subgraph_edge_masks(self.model.label_map, class_results, self.consistency_tracker, epoch, split=self.split_name)
 
 
-    def evaluate(self, val_loader, epoch: int) -> ModelResults:
+    def evaluate(self, val_loader, epoch: int) -> tuple[ModelResults, TranslatorResults]:
         print("===== Evaluation =====")
 
         self.model.eval()
@@ -100,6 +114,8 @@ class Evaluater(CoreRunner):
         avg_metrics = {
             f"{self.split_name}/model_loss": model_results.loss,
             f"{self.split_name}/model_acc": model_accuracy,
+            f"{self.split_name}/cosface_loss": model_results.cosface_loss,
+            f"{self.split_name}/infonce_loss": model_results.infonce_loss,
             f"{self.split_name}/translator_loss": translator_results.loss,
             f"{self.split_name}/translator_acc": translator_accuracy,
         }

@@ -125,23 +125,24 @@ class EdgeMaskExplainer:
       and returns per-class edge masks.
 
       Args:
-          model: trained GNN model
+          model: trained GNN model, used for its full label_map (results may
+              not contain every class, e.g. a rare class absent from this split).
           results: ModelResults
           loader: Any loader sampler would work.
-          batch_size: batch size for the explainer loader
 
       Returns:
           class_edge_masks: class_idx -> list of edge mask tensors
       """
 
-      num_classes = len(set(results.labels))
-      batch_size = loader.batch_size
+      num_classes = len(model.label_map)
       edge_index = loader.dataset[0].edge_index
 
       # Post-Hoc explanation
       if results.edge_masks:
         class_edge_masks = {class_idx: results.for_class(class_idx).correct().edge_masks for class_idx in range(num_classes)}
-      
+      else:
+        class_edge_masks = {class_idx: [] for class_idx in range(num_classes)}
+
       class_results = self._aggregate_class_results(results, class_edge_masks, edge_index)
       return class_results
 
@@ -221,6 +222,9 @@ class CoreRunner:
     # Scalar accumulators
     model_loss_sum = 0.0
     translator_loss_sum = 0.0
+    cosface_loss_sum = 0.0
+    infonce_loss_sum = 0.0
+    infonce_batch_count = 0
 
     # Collection lists
     model_predictions: list = []
@@ -246,10 +250,16 @@ class CoreRunner:
         # Scalars
         model_loss_sum += model_loss.item()
         translator_loss_sum += translator_loss.item()
+        cosface_loss_sum += model_metrics["cosface_loss"]
+        # infonce_loss is nan until warmup completes -- average only over the
+        # batches where it was actually computed, instead of poisoning the mean.
+        if not np.isnan(model_metrics["infonce_loss"]):
+            infonce_loss_sum += model_metrics["infonce_loss"]
+            infonce_batch_count += 1
 
         # Embeddings & labels
         model_emb_list.append(model_out["graph_embedding"].detach().cpu())
-        translator_emb_list.append(translator_out["graph_embedding"].detach().cpu())
+        translator_emb_list.append(translator_out["label_embedding"].detach().cpu())
         all_labels += y.cpu().tolist()
 
         # Attention
@@ -294,6 +304,8 @@ class CoreRunner:
         labels=all_labels,
         dataset_index=list(data_loader.sampler),
         loss=model_loss_sum/num_batches,
+        cosface_loss=cosface_loss_sum/num_batches,
+        infonce_loss=infonce_loss_sum/infonce_batch_count if infonce_batch_count > 0 else float("nan"),
     ), TranslatorResults(
         predictions = translator_predictions,
         pred_confidence = translator_pred_confidence,
@@ -302,3 +314,102 @@ class CoreRunner:
         dataset_index = list(data_loader.sampler),
         loss=translator_loss_sum/num_batches
     )
+
+  # ------------------------------------------------------------------ #
+  # Explanation fidelity                                                #
+  # ------------------------------------------------------------------ #
+
+  @torch.no_grad()
+  def fidelity_check(self, dataset, top_frac: float = 0.1, max_samples: int = 100) -> dict:
+    """
+    Edge-ablation fidelity check for the model's attention-based subgraph explanation.
+
+    For up to `max_samples` graphs: run the normal forward pass to get a
+    baseline prediction and this graph's (second-layer) attention weights,
+    then rerun the model twice more on the SAME graph with its edges
+    restricted to either the top `top_frac` by attention ("topk") or
+    everything else ("complement"). A genuinely discriminative attention map
+    should mean high topk accuracy (the kept subgraph is sufficient on its
+    own) and low complement accuracy (the discarded subgraph isn't) --
+    conditioned on the samples the model actually classifies correctly in
+    the first place, since ablating an already-wrong prediction says
+    nothing about explanation quality.
+
+    Each graph is run as its own single-graph "batch" (batch index all
+    zeros), so its attention/edge_index never need batch-offset bookkeeping.
+
+    Caveat: GATv2Conv adds self-loops internally on every forward call,
+    regardless of what edge_index is passed in, so a node can always attend
+    to itself even in the "complement" ablation. Self-loop edges are
+    excluded from the top-k/complement ranking below since they aren't part
+    of the actual gene-interaction graph, but they still mean complement
+    accuracy is not a true zero-information baseline.
+
+    Args:
+        dataset: iterable of individual PyG Data graphs (e.g. loader.dataset).
+        top_frac: Fraction of highest-attention (non-self-loop) edges kept
+            in the "topk" ablation.
+        max_samples: Cap on graphs examined -- each one costs up to 3
+            forward passes, so this is a periodic diagnostic, not a
+            per-batch metric.
+
+    Returns:
+        dict: baseline_acc (over all examined graphs), topk_acc and
+            complement_acc (over the baseline-correct subset only),
+            n_samples, n_baseline_correct.
+    """
+    self.model.eval()
+
+    n_total = 0
+    n_baseline_correct = 0
+    n_topk_correct = 0
+    n_complement_correct = 0
+
+    for data in dataset:
+      if n_total >= max_samples:
+        break
+      n_total += 1
+
+      x = data.x.unsqueeze(1).to(self.device)
+      edge_index = data.edge_index.to(self.device)
+      label = int(data.y.squeeze().item())
+      batch = torch.zeros(x.size(0), dtype=torch.long, device=self.device)
+      label_tensor = torch.tensor([label], device=self.device)
+
+      model_out, _ = self.model.predict(x, edge_index, batch)
+      _, metrics = self.model.cosface_loss(model_out["graph_embedding"], label_tensor)
+      if metrics["pred_idx"].item() != label:
+        continue
+      n_baseline_correct += 1
+
+      local_edge_index, attn = model_out["attention"][0]
+      local_edge_index = local_edge_index.to(self.device)
+      attn = attn.to(self.device)
+
+      non_self_loop = local_edge_index[0] != local_edge_index[1]
+      local_edge_index = local_edge_index[:, non_self_loop]
+      attn = attn[non_self_loop]
+      if attn.numel() == 0:
+        continue
+
+      k = max(1, int(top_frac * attn.numel()))
+      order = torch.argsort(attn, descending=True)
+      topk_edge_index = local_edge_index[:, order[:k]]
+      complement_edge_index = local_edge_index[:, order[k:]]
+
+      for ablated_edge_index, is_topk in [(topk_edge_index, True), (complement_edge_index, False)]:
+        ablated_out, _ = self.model.predict(x, ablated_edge_index, batch)
+        _, ablated_metrics = self.model.cosface_loss(ablated_out["graph_embedding"], label_tensor)
+        if ablated_metrics["pred_idx"].item() == label:
+          if is_topk:
+            n_topk_correct += 1
+          else:
+            n_complement_correct += 1
+
+    return {
+        "baseline_acc": n_baseline_correct / n_total if n_total > 0 else float("nan"),
+        "topk_acc": n_topk_correct / n_baseline_correct if n_baseline_correct > 0 else float("nan"),
+        "complement_acc": n_complement_correct / n_baseline_correct if n_baseline_correct > 0 else float("nan"),
+        "n_samples": n_total,
+        "n_baseline_correct": n_baseline_correct,
+    }

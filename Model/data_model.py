@@ -76,6 +76,8 @@ class MLResults:
 @dataclass
 class ModelResults(MLResults):
   edge_masks: list[EdgeMask]
+  cosface_loss: float
+  infonce_loss: float
 
 @dataclass
 class TranslatorResults(MLResults):
