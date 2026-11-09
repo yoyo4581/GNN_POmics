@@ -1,11 +1,22 @@
+import os
+
 import networkx as nx
 from neo4j import GraphDatabase
-import networkx as nx
+
+
+def neo4j_driver():
+    """Connect to the Neo4j knowledge graph using NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD."""
+    password = os.environ.get("NEO4J_PASSWORD")
+    if not password:
+        raise RuntimeError("Set NEO4J_PASSWORD (and optionally NEO4J_URI, NEO4J_USER) to fetch the graph from Neo4j.")
+    return GraphDatabase.driver(
+        os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        auth=(os.environ.get("NEO4J_USER", "neo4j"), password),
+    )
 
 
 class GraphSnapshot:
     def __init__(self, pickle_filepath = None):
-        self.driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "458458Yoyo"))
         if pickle_filepath:
             print(f"Loading graph from {pickle_filepath}...")
             self.graph = self.from_pickle(pickle_filepath)
@@ -29,6 +40,7 @@ class GraphSnapshot:
         G.graph['gene_idx'] = {}
         G.graph['idx_gene'] = {}
         G.graph['pid_idx'] = {}
+        self.driver = neo4j_driver()
         try:
             self.driver.verify_connectivity()
 
@@ -46,7 +58,7 @@ class GraphSnapshot:
                 for record in rels:
                     G.add_edge(record["source"], record["target"], type=record["type"], **record["props"])
 
-                pathway_data = session.run("""
+                pathway_data = session.run(r"""
                     MATCH (p:Pathway)
                     RETURN p.name, p.title
                     ORDER BY toInteger(apoc.text.regexGroups(p.name, '(\d+)$')[0][1])

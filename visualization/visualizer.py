@@ -81,7 +81,6 @@ class Visualizer:
 
     # NOTE: per-class networkX renders (plot_network / log_network_figure) are no
     # longer pushed to W&B -- they were too noisy to be a useful training signal.
-    # The implementations still live in graph_vis.py for ad-hoc/local use.
 
     correlation_line_plot = cons_tracker.update(epoch, class_results)
     
