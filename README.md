@@ -1,4 +1,4 @@
-# GNN_POmics — Tissue Classification on Pathway Gene Graphs
+# Graph Attention Neural Network for Discriminative Sub-network Identification
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yoyo4581/GNN_POmics/blob/main/RefinedML.ipynb)
 
