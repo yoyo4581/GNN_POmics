@@ -18,8 +18,9 @@ description instead of retraining, and it keeps a **prototype memory** of class 
   descriptions.
 - **Add classes without retraining** — `model.add_class(key, description)` embeds a new tissue's description with
   BioBERT and appends it to the label bank. The top-1 vs top-2 similarity margin acts as a confidence score.
-- **Prototype memory + InfoNCE** — per-class replay buffers are agglomeratively clustered into prototypes, which
-  serve as positives in an InfoNCE loss once warmup is complete.
+- **Prototype memory + InfoNCE** — graph embeddings are pushed into per-class replay buffers that are agglomeratively
+  clustered into prototypes every 10 epochs; from epoch 20 these prototypes are the positives in an InfoNCE loss on
+  the graph embedding, added to the CosFace loss with weight 0.2.
 - **Explainability built into training** — GraphMask edge masks, fidelity checks (top-k vs complement edges),
   per-class chord diagrams and intra/inter-class cosine-similarity tracking, all logged to Weights & Biases.
 
@@ -40,15 +41,37 @@ exported from a local Neo4j knowledge graph (`Dataset/db_callers/GraphSnapshot.p
 ## Architecture
 
 ```mermaid
-flowchart LR
-    X["Sample on KEGG graph<br/>4,601 nodes · log2(TPM+1)"] --> N[GraphConditionedNorm]
+flowchart TD
+    X["Sample on KEGG graph<br/>4,601 genes · log2(TPM+1)"] --> N["GraphConditionedNorm"]
     N --> G["GATv2 encoder<br/>2 layers · 4 heads · attention pooling"]
     G --> E(["Graph embedding · 768-d"])
-    E --> C["CosFace classifier<br/>(trains backbone)"]
-    E --> P[("Prototype memory<br/>InfoNCE after warmup")]
-    E -. detached .-> T["Label head<br/>→ BioBERT space"]
-    B["BioBERT embeddings of<br/>tissue descriptions"] --> T
-    T --> O["Prediction + margin confidence<br/>new classes via add_class()"]
+
+    subgraph backbone["Backbone losses: train norm + GAT + CosFace weights"]
+        CF["CosFace loss<br/>learned class weights · margin 0.35"]
+        NCE["InfoNCE loss × 0.2<br/>from epoch 20"]
+        M[("Prototype memory<br/>per-class queues · clustered every 10 epochs")]
+        L1{{"CosFace + 0.2 · InfoNCE"}}
+    end
+
+    E --> CF
+    E --> NCE
+    E -- "pushed each epoch" --> M
+    M -- "positive: nearest same-class prototype<br/>negatives: other classes' queues" --> NCE
+    CF --> L1
+    NCE --> L1
+    CF -. "argmax cosine" .-> P1["CosFace prediction"]
+
+    subgraph head["Label head: trains the projector only"]
+        PR["Projector<br/>Linear + LayerNorm"]
+        S["Cosine similarity to each tissue"]
+        L2{{"Margin cross-entropy"}}
+    end
+
+    E -. "detached, no gradient to backbone" .-> PR
+    PR --> S
+    B["BioBERT embeddings of<br/>tissue names, fixed"] --> S
+    S --> L2
+    S -. "top-1 minus top-2 margin" .-> P2["Label-head prediction + confidence<br/>new tissue via add_class()"]
 ```
 
 | Component | File |
@@ -65,6 +88,8 @@ flowchart LR
 
 | Setting | Value |
 |---|---|
+| Backbone loss | CosFace + 0.2 × InfoNCE (InfoNCE from epoch 20), both on the graph embedding |
+| Label-head loss | Margin cross-entropy over cosine similarity to BioBERT tissue embeddings (projector only) |
 | Optimiser | AdamW, weight decay 1e-5 |
 | Learning rate | 5e-3 backbone, 1e-4 label head |
 | Schedule | 25-epoch linear warmup, then cosine decay; a 5-epoch loss plateau triggers a warm restart at 0.85× the previous peak |
